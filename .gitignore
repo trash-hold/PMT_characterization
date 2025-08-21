@@ -1,0 +1,4 @@
+venv/**
+secret/**
+drivers/**
+**/__pycache__/**
