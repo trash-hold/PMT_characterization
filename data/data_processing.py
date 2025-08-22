@@ -4,8 +4,8 @@
 #   [X] Filtering + Checking amplitude
 #   [ ]
 # [ ] Trying simple active threshold method -- read N entry samples and try to establish some treshold
-#   [ ] Finding optimal amount of samples
-#   [ ] 
+#   [ ] Finding optimal amount of samples -- check at multiple Vin
+#   [ ] Comparing multiple methods 
 
 # Core goals:
 # a) Getting muon distribution -- for more optimized timeout definition
@@ -295,6 +295,72 @@ class DataAnalyzer():
 
         return baseline_offset
     
+    def calculate_convergence_metrics(self, 
+                                      metrics: list, 
+                                      max_samples: int = 4000, 
+                                      increment: int = 10, 
+                                      baseline_end_fraction: float = 0.4) -> dict:
+        """
+        Calculates convergence statistics for a list of functions in a single pass.
+        This is highly efficient as it avoids re-reading data.
+
+        Args:
+            metrics (list): A list of callable functions to apply to the data slices
+                            (e.g., [np.median, np.std]).
+            max_samples (int): The maximum number of baseline samples to check.
+            increment (int): The step size for increasing the number of samples.
+            baseline_end_fraction (float): Fraction of the waveform to use as baseline.
+
+        Returns:
+            dict: A dictionary where keys are function names and values are dicts
+                  containing the results ('splits', 'means', 'stds').
+        """
+        print(f"\n--- Calculating Convergence for {len(metrics)} metric(s) in a single pass ---")
+        
+        with h5py.File(self.dc.path, 'r') as f:
+            num_waveforms = f['waveforms'].shape[0]
+            total_points = f['waveforms'].shape[1]
+
+        baseline_end_index = int(total_points * baseline_end_fraction)
+        if max_samples > baseline_end_index:
+            max_samples = baseline_end_index
+
+        split_sizes = list(range(increment, max_samples + increment, increment))
+        
+        # Create a list of dictionaries to store raw results, one for each metric
+        # e.g., all_results = [ {10:[...], 20:[...]}, {10:[...], 20:[...]} ]
+        all_results = [{size: [] for size in split_sizes} for _ in metrics]
+
+        # --- The Single, Efficient Loop ---
+        for i in tqdm(range(num_waveforms), desc="Processing Waveforms"):
+            waveform = self.dc.get_single_data(i)
+            baseline_data = waveform[:baseline_end_index]
+
+            for size in split_sizes:
+                data_slice = baseline_data[:size]
+                # Apply each function to the same data slice
+                for func_index, func in enumerate(metrics):
+                    result_value = func(data_slice)
+                    all_results[func_index][size].append(result_value)
+        
+        # --- Process the raw results into a clean output dictionary ---
+        final_output = {}
+        for func_index, func in enumerate(metrics):
+            raw_results_for_func = all_results[func_index]
+            
+            mean_of_results = [np.mean(raw_results_for_func[size]) for size in split_sizes]
+            std_of_results = [np.std(raw_results_for_func[size]) for size in split_sizes]
+            
+            # Use the function's name as the key for the final dictionary
+            func_name = func.__name__ if hasattr(func, '__name__') else f"metric_{func_index}"
+            final_output[func_name] = {
+                'splits': split_sizes,
+                'means': mean_of_results,
+                'stds': std_of_results
+            }
+            
+        return final_output
+    
     def run_fft(self) -> None:
         # First get data 
         data: np.array = self.dc.get_single_data(3)
@@ -556,9 +622,82 @@ class DataAnalyzer():
         print("\n--- System Characterization ---")
         print(f"Average Physical Noise (σ_physical): {avg_physical_std:.6f}")
         print(f"Average ADC Voltage Step: {avg_adc_step:.6f}")
-        
+    
+    def plot_convergence_results(self, results_data: dict, plot_title: str):
+        """
+        Plots the convergence data, including a plot of the relative change
+        compared to the final value.
 
-FILE_PATH = './MUON_TEST_V1_2025-08-21_09-27-25.h5'
+        Args:
+            results_data (dict): The dictionary from calculate_convergence_metrics.
+            plot_title (str): The main title for the plots.
+        """
+        # Create a figure with THREE subplots, stacked vertically
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(12, 15), sharex=True)
+        fig.suptitle(plot_title, fontsize=16)
+
+        # Loop through each metric in the results dictionary
+        for func_name, data in results_data.items():
+            split_sizes = np.array(data['splits'])
+            means = np.array(data['means'])
+            stds = np.array(data['stds'])
+
+            # --- Plot 1: Mean of the metric ---
+            ax1.plot(split_sizes, means, '.-', label=f'Mean of {func_name}')
+            
+            # --- Plot 2: Standard Deviation of the metric ---
+            ax2.plot(split_sizes, stds, '.-', label=f'Std Dev of {func_name}')
+
+            # --- Plot 3: NEW - Relative Change Calculation ---
+            # The "final value" is the last one in the series (most stable)
+            final_mean = means[-1]
+            final_std = stds[-1]
+            
+            # Calculate relative change, avoiding division by zero
+            if abs(final_mean) > 1e-9:
+                relative_change_mean = np.abs((means - final_mean) / final_mean)
+                ax3.plot(split_sizes, relative_change_mean, '.-', 
+                         label=f'Rel. Change in Mean ({func_name})')
+
+            if abs(final_std) > 1e-9:
+                relative_change_std = np.abs((stds - final_std) / final_std)
+                ax4.plot(split_sizes, relative_change_std, '.--', 
+                         label=f'Rel. Change in Std ({func_name})')
+
+        # --- Configure Axes ---
+        ax1.set_title('Absolute Value of Metrics')
+        ax1.set_ylabel('Mean of Metric')
+        ax1.grid(True)
+        ax1.legend()
+
+        ax2.set_title('Uncertainty of Metrics')
+        ax2.set_ylabel('Standard Deviation (Uncertainty)')
+        ax2.set_yscale('log')
+        ax2.grid(True, which="both")
+        ax2.legend()
+        
+        relative = [ax3, ax4]
+        for ax in relative:
+            ax.set_title('Convergence: Relative Change Compared to Final Value')
+            ax.set_title('Convergence: Relative Change Compared to Final Value')
+            ax.set_xlabel('Number of Samples in Calculation')
+            ax.set_ylabel('Relative Change (Fraction)')
+            ax.set_yscale('log') # Log scale is essential here
+            ax.grid(True, which="both")
+            ax.legend()
+            
+            # Add a horizontal line for 1% (0.01) and 0.1% (0.001) convergence
+            ax.axhline(0.01, color='gray', linestyle=':', linewidth=1, label='1% Change')
+            ax.axhline(0.001, color='black', linestyle=':', linewidth=1, label='0.1% Change')
+            ax.legend() # Re-call legend to include axhline labels
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.97]) # Adjust for suptitle
+        plt.show()
+
+FILE_PATH = './pmt_data/muon_test/MUON_TEST_V1_2025-08-22_13-29-35_1450.h5'
+
+def absolute_mean(data: np.array) -> np.array:
+    return np.mean(abs(data))
 
 if __name__ == "__main__":
     conv = DataConverter(FILE_PATH, FileFormat.H5)
@@ -575,10 +714,27 @@ if __name__ == "__main__":
         waveform_index=0, 
         baseline_samples=OPTIMAL_BASELINE_SAMPLES
     )
-    '''
+    
     anal.fit_multi_gaussian_distribution(
         num_waveforms=500, 
         baseline_samples=3500,
         num_bins=150 # More bins can give a more detailed view
+    )
+    '''
+
+    metrics_to_run = [np.mean, absolute_mean, np.median, np.std]
+
+    # --- STEP 2: Run the calculation ONCE to get all the data ---
+    # This is now much more efficient.
+    convergence_data = anal.calculate_convergence_metrics(
+        metrics=metrics_to_run,
+        max_samples=4000
+    )
+
+    # --- STEP 3: Plot the results ---
+    # The plotting function uses the data we just calculated.
+    anal.plot_convergence_results(
+        results_data=convergence_data,
+        plot_title='Convergence of Baseline and Noise Level Metrics'
     )
     
