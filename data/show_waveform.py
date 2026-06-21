@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 # --- Configuration ---
 # !!! IMPORTANT: Change this to the path of your HDF5 file !!!
-FILE_PATH = './MUON_TEST_V1_2025-08-21_09-27-25.h5'
+FILE_PATH = './pmt_data/voltage_test/CONVERTED_BAD_DATA_1970V.h5'
 
 # Choose which waveform to plot from the file (0 is the first one)
 WAVEFORM_INDEX_TO_PLOT = 0

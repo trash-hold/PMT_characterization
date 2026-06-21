@@ -2,3 +2,6 @@ venv/**
 secret/**
 drivers/**
 **/__pycache__/**
+data/data/**
+data/pmt_data/**
+data/analysis/**
